@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
+
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.factory.ArtifactFactory;
 import org.apache.maven.artifact.metadata.ArtifactMetadataSource;
@@ -55,6 +56,7 @@ import org.apache.maven.plugin.descriptor.PluginDescriptor;
 import org.apache.maven.plugin.surefire.booterclient.ChecksumCalculator;
 import org.apache.maven.plugin.surefire.booterclient.ForkConfiguration;
 import org.apache.maven.plugin.surefire.booterclient.ForkStarter;
+import org.apache.maven.plugin.surefire.util.DependencyScanner;
 import org.apache.maven.plugin.surefire.util.DirectoryScanner;
 import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.Parameter;
@@ -578,6 +580,15 @@ public abstract class AbstractSurefireMojo
     protected String runOrder;
 
     /**
+     * List of dependencies to scan for test classes to include in the test run. Each dependency string must follow the format
+     * <i>groupId:artifactId</i>. For example: <i>org.acme:project-a</i>
+     *
+     * @since 2.14
+     */
+    @Parameter(property = "dependenciesToScan")
+    protected List<String> dependenciesToScan;
+
+    /**
      *
      */
     @Component
@@ -605,7 +616,7 @@ public abstract class AbstractSurefireMojo
 
         if ( verifyParameters() && !hasExecutedBefore() )
         {
-            DefaultScanResult scan = scanDirectories();
+            DefaultScanResult scan = scanForTestClasses();
             if ( !isValidSuiteXmlFileConfig() && scan.isEmpty() )
             {
                 if ( getEffectiveFailIfNoTests() )
@@ -628,10 +639,35 @@ public abstract class AbstractSurefireMojo
         toolchain = getToolchain();
     }
 
+    private DefaultScanResult scanForTestClasses()
+    {
+        DefaultScanResult scan = scanDirectories();
+        DefaultScanResult scanDeps = scanDependencies();
+        if(!scanDeps.isEmpty())
+        {
+            List combined = new ArrayList();
+            combined.addAll(scan.getFiles());
+            combined.addAll(scanDeps.getFiles());
+            scan = new DefaultScanResult(combined);
+        }
+        return scan;
+    }
+
     private DefaultScanResult scanDirectories()
     {
         return new DirectoryScanner( getTestClassesDirectory(), getIncludeList(), getExcludeList(),
                                      getSpecificTests() ).scan();
+    }
+
+    private DefaultScanResult scanDependencies()
+    {
+        try {
+            return new DependencyScanner(
+                    DependencyScanner.filter(project.getTestArtifacts(), getDependenciesToScan()),
+                    getIncludeList(), getExcludeList(), getSpecificTests()).scan();
+	    } catch(Exception e) {
+	        throw new RuntimeException(e);
+        }
     }
 
     boolean verifyParameters()
@@ -654,7 +690,7 @@ public abstract class AbstractSurefireMojo
             }
         }
 
-        if ( !getTestClassesDirectory().exists() )
+        if ( !getTestClassesDirectory().exists() && getDependenciesToScan().size() == 0)
         {
             if ( Boolean.TRUE.equals( getFailIfNoTests() ) )
             {
@@ -1507,6 +1543,7 @@ public abstract class AbstractSurefireMojo
         checksum.add( getObjectFactory() );
         checksum.add( getFailIfNoTests() );
         checksum.add( getRunOrder() );
+        checksum.add( getDependenciesToScan() );
         addPluginSpecificChecksumItems( checksum );
         return checksum.getSha1();
 
@@ -2450,6 +2487,16 @@ public abstract class AbstractSurefireMojo
     public void setRunOrder( String runOrder )
     {
         this.runOrder = runOrder;
+    }
+
+    public List<String> getDependenciesToScan()
+    {
+        return this.dependenciesToScan;
+    }
+
+    public void setDependenciesToScan(List<String> dependenciesToScan)
+    {
+        this.dependenciesToScan = dependenciesToScan;
     }
 
     public PluginDescriptor getPluginDescriptor()
