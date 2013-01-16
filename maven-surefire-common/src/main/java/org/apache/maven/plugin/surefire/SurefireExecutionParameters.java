@@ -124,4 +124,8 @@ public interface SurefireExecutionParameters
     Boolean getFailIfNoSpecifiedTests();
 
     void setFailIfNoSpecifiedTests( Boolean failIfNoSpecifiedTests );
+
+    List<String> getAdditionalProfiles();
+
+    void setAdditionalProfiles(List<String> additionalProfiles);
 }

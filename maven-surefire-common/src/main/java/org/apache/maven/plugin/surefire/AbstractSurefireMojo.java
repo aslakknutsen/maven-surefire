@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
+
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.factory.ArtifactFactory;
 import org.apache.maven.artifact.metadata.ArtifactMetadataSource;
@@ -48,6 +49,7 @@ import org.apache.maven.artifact.versioning.InvalidVersionSpecificationException
 import org.apache.maven.artifact.versioning.VersionRange;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.model.Plugin;
+import org.apache.maven.model.Profile;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
@@ -58,7 +60,12 @@ import org.apache.maven.plugin.surefire.booterclient.ForkStarter;
 import org.apache.maven.plugin.surefire.util.DirectoryScanner;
 import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.Parameter;
+import org.apache.maven.profiles.DefaultProfileManager;
+import org.apache.maven.profiles.ProfileManager;
 import org.apache.maven.project.MavenProject;
+import org.apache.maven.project.MavenProjectBuilder;
+import org.apache.maven.settings.Settings;
+import org.apache.maven.settings.SettingsUtils;
 import org.apache.maven.shared.artifact.filter.PatternIncludesArtifactFilter;
 import org.apache.maven.shared.utils.StringUtils;
 import org.apache.maven.shared.utils.io.FileUtils;
@@ -490,6 +497,20 @@ public abstract class AbstractSurefireMojo
      */
     @Parameter( property = "trimStackTrace", defaultValue = "true" )
     protected boolean trimStackTrace;
+
+    /**
+     * List of profile ids to active when resolving the TestClasspath.
+     *
+     * @since 2.14
+     */
+    @Parameter( property = "additionalProfiles")
+    private List<String> additionalProfiles;
+
+    /**
+     * Recalculate the dependencies if additional profiles for testing are added
+     */
+    @Component
+    private MavenProjectBuilder projectBuilder;
 
     /**
      * Resolves the artifacts needed.
@@ -1499,6 +1520,7 @@ public abstract class AbstractSurefireMojo
         checksum.add( getUseUnlimitedThreads() );
         checksum.add( getParallel() );
         checksum.add( isTrimStackTrace() );
+        checksum.add( getAdditionalProfiles() );
         checksum.add( getRemoteRepositories() );
         checksum.add( isDisableXmlReport() );
         checksum.add( isUseSystemClassLoader() );
@@ -1555,13 +1577,19 @@ public abstract class AbstractSurefireMojo
         throws InvalidVersionSpecificationException, MojoFailureException, ArtifactResolutionException,
         ArtifactNotFoundException, MojoExecutionException
     {
-        List<String> classpath = new ArrayList<String>( 2 + getProject().getArtifacts().size() );
-
+        Set<Artifact> classpathArtifacts;
+        if (getAdditionalProfiles() != null && getAdditionalProfiles().size() > 0)
+        {
+            classpathArtifacts = recalculateWithAdditionalProfiles();
+        }
+        else
+        {
+            classpathArtifacts = getProject().getArtifacts();
+        }
+        List<String> classpath = new ArrayList<String>();
         classpath.add( getTestClassesDirectory().getAbsolutePath() );
 
         classpath.add( getClassesDirectory().getAbsolutePath() );
-
-        @SuppressWarnings( "unchecked" ) Set<Artifact> classpathArtifacts = getProject().getArtifacts();
 
         if ( getClasspathDependencyScopeExclude() != null && !getClasspathDependencyScopeExclude().equals( "" ) )
         {
@@ -1607,6 +1635,65 @@ public abstract class AbstractSurefireMojo
         }
 
         return new Classpath( classpath );
+    }
+
+    private Set<Artifact> recalculateWithAdditionalProfiles() throws MojoFailureException
+    {
+        try
+        {
+            MavenSession session = getSession();
+
+            // Reload the Project with the new Profiles applied
+            ProfileManager profileManager = new DefaultProfileManager(
+                    session.getContainer(),
+                    session.getExecutionProperties());
+            // profileManager.loadSettingsProfiles(session.getSettings());
+
+            Settings settings = session.getSettings();
+            profileManager.explicitlyActivate(settings.getActiveProfiles());
+            for(Object settingsProfile : settings.getProfiles()) {
+                profileManager.addProfile(
+                        SettingsUtils.convertFromSettingsProfile(
+                                (org.apache.maven.settings.Profile)settingsProfile));
+            }
+
+            for ( Object definedProfile : getProject().getModel().getProfiles())
+            {
+                Profile profile = (Profile) definedProfile;
+                profileManager.addProfile( profile );
+            }
+
+            for( Object activeProfile : getProject().getActiveProfiles())
+            {
+                Profile profile = (Profile)activeProfile;
+                profileManager.explicitlyActivate(profile.getId());
+            }
+            for (String additionalProfile : getAdditionalProfiles())
+            {
+                if ( additionalProfile != null )
+                {
+                    profileManager.explicitlyActivate(additionalProfile);
+                }
+            }
+
+            getLog().info("Recalculating test classpath based on the following profiles:");
+            for(Object activeProfile :profileManager.getActiveProfiles())
+            {
+                Profile profile = (Profile)activeProfile;
+                getLog().info("  - " + profile.getId() + " (source: " + profile.getSource()  +")");
+            }
+
+            MavenProject newProject = getProjectBuilder().buildWithDependencies(
+                    getProject().getFile(),
+                    getLocalRepository(),
+                    profileManager);
+
+            return newProject.getArtifacts();
+        }
+        catch (Exception e)
+        {
+            throw new MojoFailureException("Could not append additional Profiles: " + getAdditionalProfiles(), e);
+        }
     }
 
     void addTestNgUtilsArtifacts( List<String> classpath )
@@ -2321,6 +2408,26 @@ public abstract class AbstractSurefireMojo
     {
         this.trimStackTrace = trimStackTrace;
     }
+
+    public List<String> getAdditionalProfiles()
+    {
+		return additionalProfiles;
+    }
+
+    public void setAdditionalProfiles(List<String> additionalProfiles)
+    {
+		this.additionalProfiles = additionalProfiles;
+    }
+
+    public MavenProjectBuilder getProjectBuilder()
+    {
+		return projectBuilder;
+	}
+
+    public void setProjectBuilder(MavenProjectBuilder projectBuilder)
+    {
+		this.projectBuilder = projectBuilder;
+	}
 
     public ArtifactResolver getArtifactResolver()
     {
